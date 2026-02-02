@@ -61,7 +61,8 @@ services:
       context: ..
       dockerfile: Docker/Dockerfile.python
     container_name: flask-producer
-    command: python /app/src/producer_raw.py
+    command: python /app/src/producer_raw.py --csv /app/data/transactions_data.csv --mode rate --rate 50
+
     volumes:
       - ../:/app
     depends_on:
@@ -72,6 +73,12 @@ services:
     environment:
       FLASK_APP: src/producer_raw.py
       FLASK_ENV: development
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_TOPIC: raw-topic
+      RATE: "50"
+      ACKS: "all"
+      KEY_FIELD: "card_id"
+      CHECKPOINT_PATH: "/app/checkpoint.txt"
 
   ml-worker:
     build:
