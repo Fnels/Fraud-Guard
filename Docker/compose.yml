@@ -61,7 +61,7 @@ services:
       context: ..
       dockerfile: Docker/Dockerfile.python
     container_name: flask-producer
-    command: python /app/src/Producer_raw.py
+    command: python /app/src/producer_raw.py
     volumes:
       - ../:/app
     depends_on:
@@ -70,7 +70,7 @@ services:
     ports:
       - "5000:5000"
     environment:
-      FLASK_APP: src/Producer_raw.py
+      FLASK_APP: src/producer_raw.py
       FLASK_ENV: development
 
   ml-worker:
@@ -78,7 +78,7 @@ services:
       context: ..
       dockerfile: Docker/Dockerfile.python
     container_name: ml-worker
-    command: python /app/src/Worker.py
+    command: python /app/src/worker.py
     volumes:
       - ../:/app
     depends_on:
@@ -139,7 +139,7 @@ services:
     container_name: consumer-group-1
     # Example command to submit spark job. User will replace with actual script path.
     # Using 'tail -f' placeholder if script doesn't exist yet, or actual command
-    command: /opt/spark/bin/spark-submit --master spark://spark-master:7077 /app/src/Consumer1.py
+    command: /opt/spark/bin/spark-submit --master spark://spark-master:7077 /app/src/consumer1.py
     volumes:
       - ../:/app
     depends_on:
@@ -154,7 +154,7 @@ services:
       context: ..
       dockerfile: Docker/Dockerfile.spark
     container_name: consumer-group-2
-    command: /opt/spark/bin/spark-submit --master spark://spark-master:7077 /app/src/Consumer2.py
+    command: /opt/spark/bin/spark-submit --master spark://spark-master:7077 /app/src/consumer2.py
     volumes:
       - ../:/app
     depends_on:
