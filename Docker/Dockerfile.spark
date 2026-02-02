@@ -1,0 +1,16 @@
+FROM apache/spark:3.5.8
+
+USER root
+
+WORKDIR /app
+
+# Install pip and python dependencies
+# Note: apache/spark usually runs on a minimal linux. Clean up apt caches.
+RUN apt-get update && apt-get install -y python3-pip && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+# Install requirements for all users
+RUN pip3 install --no-cache-dir -r requirements.txt
+
+USER spark

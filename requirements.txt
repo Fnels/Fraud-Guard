@@ -1,0 +1,9 @@
+Flask
+kafka-python
+redis
+PyMySQL
+SQLAlchemy
+scikit-learn
+pandas
+numpy
+pyspark==3.5.0

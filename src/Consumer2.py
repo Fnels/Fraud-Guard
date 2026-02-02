@@ -1,0 +1,1 @@
+# consumer group 2 의 역할을 수행합니다.

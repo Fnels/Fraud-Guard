@@ -1,0 +1,178 @@
+services:
+  # ---------------------------------------------------------------------------
+  # Core Infrastructure: Kafka, Zookeeper (None), Redis, MySQL
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:4.1.1
+    hostname: kafka
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      # KRaft settings
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk" # Random UUID for KRaft
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      - kafka
+
+  redis:
+    image: redis:latest
+    container_name: redis
+    ports:
+      - "6379:6379"
+
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  # ---------------------------------------------------------------------------
+  # Python Applications: Producer, ML Worker, Dev Env
+  # ---------------------------------------------------------------------------
+  flask-producer:
+    build:
+      context: ..
+      dockerfile: Docker/Dockerfile.python
+    container_name: flask-producer
+    command: python /app/src/Producer_raw.py
+    volumes:
+      - ../:/app
+    depends_on:
+      - kafka
+      - redis
+    ports:
+      - "5000:5000"
+    environment:
+      FLASK_APP: src/Producer_raw.py
+      FLASK_ENV: development
+
+  ml-worker:
+    build:
+      context: ..
+      dockerfile: Docker/Dockerfile.python
+    container_name: ml-worker
+    command: python /app/src/Worker.py
+    volumes:
+      - ../:/app
+    depends_on:
+      - kafka
+      - redis
+      - mysql
+    environment:
+      PYTHONUNBUFFERED: 1
+
+  python-dev:
+    build:
+      context: ..
+      dockerfile: Docker/Dockerfile.python
+    container_name: python-dev
+    # Keeps running as per Dockerfile CMD
+    volumes:
+      - ../:/app
+    ports:
+      - "8888:8888" # For potential Jupyter/dev use
+    environment:
+      PYTHONUNBUFFERED: 1
+
+  # ---------------------------------------------------------------------------
+  # Spark Cluster
+  # ---------------------------------------------------------------------------
+  spark-master:
+    build:
+      context: ..
+      dockerfile: Docker/Dockerfile.spark
+    container_name: spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    ports:
+      - "8081:8080" # Spark Master Web UI
+      - "7077:7077"
+
+  spark-worker:
+    build:
+      context: ..
+      dockerfile: Docker/Dockerfile.spark
+    container_name: spark-worker
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    depends_on:
+      - spark-master
+    ports:
+      - "8082:8081" # Spark Worker Web UI
+    environment:
+      SPARK_MODE: worker
+      SPARK_WORKER_CORES: 1
+      SPARK_WORKER_MEMORY: 1g
+
+  # ---------------------------------------------------------------------------
+  # Spark Consumers
+  # ---------------------------------------------------------------------------
+  consumer-group-1:
+    build:
+      context: ..
+      dockerfile: Docker/Dockerfile.spark
+    container_name: consumer-group-1
+    # Example command to submit spark job. User will replace with actual script path.
+    # Using 'tail -f' placeholder if script doesn't exist yet, or actual command
+    command: /opt/spark/bin/spark-submit --master spark://spark-master:7077 /app/src/Consumer1.py
+    volumes:
+      - ../:/app
+    depends_on:
+      - spark-master
+      - kafka
+      - mysql
+    environment:
+      SPARK_MASTER: spark://spark-master:7077
+
+  consumer-group-2:
+    build:
+      context: ..
+      dockerfile: Docker/Dockerfile.spark
+    container_name: consumer-group-2
+    command: /opt/spark/bin/spark-submit --master spark://spark-master:7077 /app/src/Consumer2.py
+    volumes:
+      - ../:/app
+    depends_on:
+      - spark-master
+      - kafka
+      - mysql
+    environment:
+      SPARK_MASTER: spark://spark-master:7077
+
+  # ---------------------------------------------------------------------------
+  # Monitoring
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    ports:
+      - "3000:3000"
+
+volumes:
+  kafka_data:
+  mysql_data:
