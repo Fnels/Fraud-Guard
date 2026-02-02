@@ -32,7 +32,7 @@ class RedisClient:
             return self.pool.ping()
 
 
-    # 결과 저장 
+    # 결과 저장  Kafka에서 데이터를 꺼내 사기 판별을 끝낸 후, 그 결과값을 Redis에 저장할 때 사용.
     def set_result(self, transaction_id, data, expire=300):
             """ML 결과를 Redis에 저장 (TTL 5분 설정)"""
             try:
