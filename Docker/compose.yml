@@ -84,7 +84,7 @@ services:
       context: ..
       dockerfile: Docker/Dockerfile.python
     container_name: flask-producer
-    command: python /app/src/terminal.py --csv /app/data/transactions_data.csv --mode rate --rate 50
+    command: python /app/src/terminal.py # --csv /app/data/transactions_data.csv --mode rate --rate 50
 
     volumes:
       - ../:/app
@@ -94,14 +94,15 @@ services:
     ports:
       - "5000:5000"
     environment:
-      FLASK_APP: src/producer_raw.py
-      FLASK_ENV: development
-      KAFKA_BOOTSTRAP: kafka:9092
-      KAFKA_TOPIC: raw-topic
-      RATE: "50"
-      ACKS: "all"
-      KEY_FIELD: "card_id"
-      CHECKPOINT_PATH: "/app/checkpoint.txt"
+      # FLASK_APP: src/producer_raw.py
+      # FLASK_ENV: development
+      # KAFKA_BOOTSTRAP: kafka:9092
+      # KAFKA_TOPIC: raw-topic
+      # RATE: "50"
+      # ACKS: "all"
+      # KEY_FIELD: "card_id"
+      # CHECKPOINT_PATH: "/app/checkpoint.txt"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
 
   ml-worker:
     build:

@@ -2,6 +2,9 @@ from flask import Flask, jsonify
 import pandas as pd
 import time
 import logging
+import json
+from kafka import KafkaProducer
+from kafka.errors import KafkaError
 from utils.formatter import get_scaled_timestamp
 
 app = Flask(__name__)
@@ -13,12 +16,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Kafka Producer 추가
+producer = None
+
+def init_kafka_producer():
+    global producer
+    try:
+        producer = KafkaProducer(
+            bootstrap_servers='kafka:9092',
+            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+            key_serializer=lambda k: str(k).encode('utf-8') if k else None,
+            acks='all'
+        )
+        logger.info("✅ Kafka Producer 연결 성공")
+    except Exception as e:
+        logger.error(f"❌ Kafka 연결 실패: {e}")
+
 @app.route('/')
 def index():
     return "Terminal Server Ready. Access /start to view data logs in Docker Desktop."
 
 @app.route('/start', methods=['GET', 'POST'])
 def start_simulation():
+    global producer
+    
+    # Producer 초기화
+    if producer is None:
+        init_kafka_producer()
+    
     try:
         # 1. 데이터 로드
         df = pd.read_csv('data/transactions_data.csv')
@@ -31,6 +56,13 @@ def start_simulation():
             # (시간 형식: 시:분은 현재, 초.밀리초는 인덱스 기반)
             data = get_scaled_timestamp(row, i)   
             
+            # Kafka로 전송 추가
+            if producer:
+                try:
+                    producer.send('raw-topic', key=data['card_id'], value=data)
+                except KafkaError as e:
+                    logger.error(f"Kafka 전송 실패: {e}")
+            
             # 3. 도커 로그로 한 줄씩 출력 (줄줄이 찍히는 핵심 부분)
             # JSON 모양을 한 줄로 예쁘게 정렬해서 출력합니다. 고유id 부여, 초 변경,
             log_msg = f"📤 [IDX:{i:04d}] | {data['id']} | {data['order_time']} | Client:{data['client_id']} | CardId:{data['card_id']}| MerchantId:{data['merchant_id']}｜Amt:{data['amount']}"
@@ -38,6 +70,10 @@ def start_simulation():
             
             # 4. 실시간 느낌을 위한 딜레이 (0.1초)
             time.sleep(0.1)
+
+        # Producer flush 추가
+        if producer:
+            producer.flush()
 
         logger.info("==================================================")
         logger.info("✅ 모든 데이터 가공 및 출력 완료")
