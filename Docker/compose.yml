@@ -50,8 +50,31 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     volumes:
       - mysql_data:/var/lib/mysql
+      
+# [NEW] DB Initializer Service (init_db.py)
+  db-initializer:
+    build:
+      context: ..
+      dockerfile: Docker/Dockerfile.python
+    container_name: db-initializer
+    command: python /app/src/init_db.py
+    volumes:
+      - ../:/app        # 소스 코드 마운트
+      - ../data:/app/data # CSV 파일 마운트 (중요!)
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
 
   # ---------------------------------------------------------------------------
   # Python Applications: Producer, ML Worker, Dev Env
