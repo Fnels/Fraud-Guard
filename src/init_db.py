@@ -15,7 +15,7 @@ if ENV_PATH.exists():
 DB_HOST = 'mysql'
 DB_USER = 'root'
 DB_PASSWORD = os.environ.get('MYSQL_ROOT_PASSWORD', 'root')
-DB_NAME = os.environ.get('MYSQL_DATABASE', 'fraud_detection')
+DB_NAME = os.environ.get('MYSQL_DATABASE', 'fraud_guard')
 DATA_DIR = Path('/app/data/origin') 
 
 def get_connection():
@@ -59,11 +59,11 @@ def create_database_and_tables():
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS merchants_data (
                     id INT PRIMARY KEY,
-                    business_name VARCHAR(255),
-                    business_type VARCHAR(100),
-                    address VARCHAR(255),
-                    latitude FLOAT,
-                    longitude FLOAT
+                    merchant_city VARCHAR(30),
+                    merchant_state VARCHAR(255),
+                    zip INT,
+                    mcc INT,
+                    mcc_full VARCHAR(100)
                 )
             """)
 
@@ -74,7 +74,7 @@ def create_database_and_tables():
                     client_id INT,
                     card_brand VARCHAR(50),
                     card_type VARCHAR(50),
-                    card_number INT,
+                    card_number VARCHAR(20),
                     expires VARCHAR(10),
                     cvv INT,
                     has_chip VARCHAR(10),
