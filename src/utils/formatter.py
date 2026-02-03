@@ -20,5 +20,6 @@ def get_scaled_timestamp(row, index):
         "client_id": int(row['client_id']),
         "card_id": int(row['card_id']),
         "merchant_id": int(row['merchant_id']),
-        "amount": float(clean_amount)
+        "amount": float(clean_amount),
+        "error": row['errors']
     }

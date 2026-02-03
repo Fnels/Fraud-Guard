@@ -3,6 +3,8 @@
 import os
 import json
 import pymysql
+import math
+import time
 from kafka import KafkaConsumer
 from pathlib import Path
 
@@ -15,14 +17,25 @@ MYSQL_PASSWORD = os.getenv('MYSQL_ROOT_PASSWORD', 'root')
 MYSQL_DB = 'fraud_guard'
 
 def get_db_connection():
-    return pymysql.connect(
-        host=MYSQL_HOST,
-        user=MYSQL_USER,
-        password=MYSQL_PASSWORD,
-        db=MYSQL_DB,
-        charset='utf8mb4',
-        cursorclass=pymysql.cursors.DictCursor
-    )
+    max_retries = 10
+    for i in range(max_retries):
+        try:
+            conn = pymysql.connect(
+                host=MYSQL_HOST,
+                user=MYSQL_USER,
+                password=MYSQL_PASSWORD,
+                db=MYSQL_DB,
+                charset='utf8mb4',
+                cursorclass=pymysql.cursors.DictCursor
+            )
+            print("✅ DB 연결 성공!")
+            return conn
+        except pymysql.err.OperationalError as e:
+            print(f"⚠️ DB 연결 실패 ({i+1}/{max_retries}): {e}")
+            print(f"   현재 설정 - Host: {MYSQL_HOST}, User: {MYSQL_USER}, PW: {'***' if MYSQL_PASSWORD else 'None'}")
+            time.sleep(5)  # 5초 쉬고 다시 시도
+
+    raise Exception("❌ DB 연결 시도 횟수 초과!")
 
 def main():
     # 1. 카프카 컨슈머 설정
@@ -50,6 +63,7 @@ def main():
                 card_id INT,
                 merchant_id INT,
                 amount DECIMAL(10, 2),
+                error VARCHAR(100),
                 is_valid BOOLEAN,
                 is_fraud BOOLEAN,
                 processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -61,11 +75,16 @@ def main():
         # 2. 메시지 소비 및 적재 루프
         for message in consumer:
             data = message.value
+            error_val = data.get('error')
+            if error_val is None or (isinstance(error_val, float) and math.isnan(error_val)):
+                 # error가 비어있으면(NaN/None) 보통 에러 없음(success)을 의미
+                 # 만약 NULL로 넣고 싶다면 None으로 설정하세요.
+                 error_val = 'success'
             
             # 2. DB Insert 쿼리
             sql = """
-                INSERT INTO transactions_data (id, order_id, order_time, client_id, card_id, merchant_id, amount, is_valid, is_fraud)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO transactions_data (id, order_id, order_time, client_id, card_id, merchant_id, amount, error, is_valid, is_fraud)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE processed_at = CURRENT_TIMESTAMP
             """
             val = (
@@ -76,6 +95,7 @@ def main():
                 data['card_id'], 
                 data['merchant_id'], 
                 data['amount'],
+                error_val,
                 data['is_valid'],
                 data['is_fraud']
             )

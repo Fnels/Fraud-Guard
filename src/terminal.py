@@ -46,7 +46,7 @@ def start_simulation():
     
     try:
         # 1. 데이터 로드
-        df = pd.read_csv('data/transactions_data.csv')
+        df = pd.read_csv('data/origin/transactions_data.csv')
         
         logger.info("==================================================")
         logger.info(f"🚀 데이터 가공 시뮬레이션 시작 (총 {len(df)}건)")
