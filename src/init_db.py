@@ -1,21 +1,21 @@
 import os
 import csv
-import time
 import pymysql
 from dotenv import load_dotenv
-from pathlib import Path  # <--- [필수 추가] 경로 처리를 위해 필요
+from pathlib import Path
 
 # .env 로드
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+ENV_PATH = BASE_DIR.parent / 'Docker' / '.env'
+
+if ENV_PATH.exists():
+    load_dotenv(dotenv_path=ENV_PATH)
 
 # 설정
 DB_HOST = 'mysql'
 DB_USER = 'root'
 DB_PASSWORD = os.environ.get('MYSQL_ROOT_PASSWORD', 'root')
 DB_NAME = os.environ.get('MYSQL_DATABASE', 'fraud_detection')
-
-# [수정] 경로를 Path 객체로 정의하고 'origin' 폴더까지 지정
-# Docker에서 ../:/app 으로 마운트했으므로, /app/data/origin 에 파일이 존재함
 DATA_DIR = Path('/app/data/origin') 
 
 def get_connection():
@@ -29,11 +29,9 @@ def get_connection():
 
 def create_database_and_tables():
     """DB 및 테이블 스키마 생성 (DDL)"""
-    # 초기 접속은 DB_NAME 없이 접속 (DB가 없을 수도 있으므로)
     conn = pymysql.connect(host=DB_HOST, user=DB_USER, password=DB_PASSWORD)
     try:
         with conn.cursor() as cursor:
-            # DB 생성
             cursor.execute(f"CREATE DATABASE IF NOT EXISTS {DB_NAME}")
             cursor.execute(f"USE {DB_NAME}")
             
@@ -49,9 +47,9 @@ def create_database_and_tables():
                     address VARCHAR(255),
                     latitude FLOAT,
                     longitude FLOAT,
-                    per_capita_income INT,
-                    yearly_income INT,
-                    total_debt INT,
+                    per_capita_income INT,   -- $ 제거 후 저장됨
+                    yearly_income INT,       -- $ 제거 후 저장됨
+                    total_debt INT,          -- $ 제거 후 저장됨
                     credit_score INT,
                     num_credit_cards INT
                 )
@@ -69,21 +67,22 @@ def create_database_and_tables():
                 )
             """)
 
-            # 3. Cards Table
+            # 3. Cards Table (컬럼 추가됨: card_on_dark_web)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS cards_data (
                     id INT PRIMARY KEY,
                     client_id INT,
                     card_brand VARCHAR(50),
                     card_type VARCHAR(50),
-                    card_number VARCHAR(20),
+                    card_number INT,
                     expires VARCHAR(10),
                     cvv INT,
                     has_chip VARCHAR(10),
                     num_cards_issued INT,
-                    credit_limit FLOAT,
+                    credit_limit FLOAT,      -- $ 제거 후 저장됨
                     acct_open_date VARCHAR(20),
                     year_pin_last_changed INT,
+                    card_on_dark_web VARCHAR(10), -- [추가된 컬럼]
                     FOREIGN KEY (client_id) REFERENCES users_data(id)
                 )
             """)
@@ -93,12 +92,23 @@ def create_database_and_tables():
     finally:
         conn.close()
 
+def clean_currency(value):
+    """$ 기호 제거 및 빈 문자열 처리"""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        # $ 기호 제거
+        clean_val = value.replace('$', '')
+        # 빈 문자열이면 None 반환 (DB에서 NULL로 처리되도록)
+        if clean_val.strip() == '':
+            return None
+        return clean_val
+    return value
+
 def load_csv(table_name, file_name):
     """CSV 파일을 읽어 DB에 적재"""
-    # Path 객체끼리의 연산이므로 이제 정상 작동함 (/)
     file_path = DATA_DIR / file_name
     
-    # 1. 파일 존재 확인
     if not file_path.exists():
         print(f"[WARN] File not found: {file_path}. Skipping {table_name} load.")
         return
@@ -106,10 +116,9 @@ def load_csv(table_name, file_name):
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            # DB 선택 (Connection 생성 시 DB_NAME을 안 넣었을 수 있으므로 명시)
             cursor.execute(f"USE {DB_NAME}")
             
-            # 2. 데이터 존재 여부 확인 (Idempotency Check)
+            # 데이터 존재 여부 확인
             cursor.execute(f"SELECT COUNT(*) as cnt FROM {table_name}")
             result = cursor.fetchone()
             
@@ -117,10 +126,8 @@ def load_csv(table_name, file_name):
                 print(f"[SKIP] Table '{table_name}' already has {result['cnt']} rows.")
                 return
 
-            # 3. CSV 읽기 및 적재
             print(f"[LOAD] Loading {file_name} into {table_name}...")
             
-            # encoding='utf-8-sig'는 엑셀 CSV의 BOM 문자 제거용 (안전장치)
             with open(file_path, 'r', encoding='utf-8-sig') as f:
                 reader = csv.DictReader(f)
                 rows = list(reader)
@@ -128,7 +135,6 @@ def load_csv(table_name, file_name):
                 if not rows:
                     return
 
-                # 동적 쿼리 생성
                 columns = rows[0].keys()
                 cols_str = ', '.join(columns)
                 vals_str = ', '.join(['%s'] * len(columns))
@@ -138,7 +144,9 @@ def load_csv(table_name, file_name):
                 batch_size = 1000
                 data_tuples = []
                 for row in rows:
-                    data_tuples.append(tuple(row[col] for col in columns))
+                    # [핵심 수정] 모든 값에 대해 $ 기호 제거 등 클리닝 수행
+                    cleaned_row = [clean_currency(row[col]) for col in columns]
+                    data_tuples.append(tuple(cleaned_row))
                 
                 for i in range(0, len(data_tuples), batch_size):
                     batch = data_tuples[i:i + batch_size]
@@ -154,12 +162,12 @@ def load_csv(table_name, file_name):
         conn.close()
 
 if __name__ == "__main__":
-    # wait_for_db() 제거됨 -> Docker Healthcheck가 대신 보장함
     print("--- DB Initializer Started ---")
     
+    # 1. DB/Table 생성
     create_database_and_tables()
     
-    # 순서 중요 (Foreign Key): Users -> Merchants -> Cards
+    # 2. CSV 적재
     load_csv('users_data', 'users_data.csv')
     load_csv('merchants_data', 'merchants_data.csv')
     load_csv('cards_data', 'cards_data.csv')
