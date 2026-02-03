@@ -15,7 +15,7 @@ if ENV_PATH.exists():
 DB_HOST = 'mysql'
 DB_USER = 'root'
 DB_PASSWORD = os.environ.get('MYSQL_ROOT_PASSWORD', 'root')
-DB_NAME = os.environ.get('MYSQL_DATABASE', 'fraud_detection')
+DB_NAME = os.environ.get('MYSQL_DATABASE', 'fraud_guard')
 DATA_DIR = Path('/app/data/origin') 
 
 def get_connection():
