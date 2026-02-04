@@ -1,5 +1,6 @@
 Flask
 requests
+pytz
 kafka-python
 redis
 PyMySQL
