@@ -1,6 +1,7 @@
 import os
 import csv
 import pymysql
+import time  # [추가] Sleep을 위해 필수
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -18,6 +19,35 @@ DB_PASSWORD = os.environ.get('MYSQL_ROOT_PASSWORD', 'root')
 DB_NAME = os.environ.get('MYSQL_DATABASE', 'fraud_guard')
 DATA_DIR = Path('/app/data/origin') 
 
+# ---------------------------------------------------------------------------
+# [NEW] DB 연결 대기 함수 (Retry Logic)
+# ---------------------------------------------------------------------------
+def wait_for_db():
+    """MySQL 서버가 실제 쿼리를 받을 준비가 될 때까지 대기합니다."""
+    retries = 30  # 최대 30번 시도 (약 60초 대기)
+    while retries > 0:
+        try:
+            # DB_NAME 없이 접속 시도 (서버가 켜졌는지만 확인)
+            conn = pymysql.connect(
+                host=DB_HOST, 
+                user=DB_USER, 
+                password=DB_PASSWORD,
+                charset='utf8mb4'
+            )
+            conn.close()
+            print("✅ MySQL is ready to accept connections!")
+            return True
+        except pymysql.MySQLError as e:
+            print(f"⏳ Waiting for MySQL to be ready... ({retries} retries left)")
+            print(f"   Error: {e}")
+            time.sleep(2)  # 2초 대기
+            retries -= 1
+    
+    raise Exception("❌ MySQL Connection Timed Out. Server is not responding.")
+
+# ---------------------------------------------------------------------------
+# Existing Functions
+# ---------------------------------------------------------------------------
 def get_connection():
     return pymysql.connect(
         host=DB_HOST,
@@ -29,6 +59,7 @@ def get_connection():
 
 def create_database_and_tables():
     """DB 및 테이블 스키마 생성 (DDL)"""
+    # 여기서도 바로 접속하지 말고, 위에서 wait_for_db를 통과한 후에 실행됨
     conn = pymysql.connect(host=DB_HOST, user=DB_USER, password=DB_PASSWORD)
     try:
         with conn.cursor() as cursor:
@@ -47,9 +78,9 @@ def create_database_and_tables():
                     address VARCHAR(255),
                     latitude FLOAT,
                     longitude FLOAT,
-                    per_capita_income INT,   -- $ 제거 후 저장됨
-                    yearly_income INT,       -- $ 제거 후 저장됨
-                    total_debt INT,          -- $ 제거 후 저장됨
+                    per_capita_income INT,   
+                    yearly_income INT,       
+                    total_debt INT,          
                     credit_score INT,
                     num_credit_cards INT
                 )
@@ -67,7 +98,7 @@ def create_database_and_tables():
                 )
             """)
 
-            # 3. Cards Table (컬럼 추가됨: card_on_dark_web)
+            # 3. Cards Table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS cards_data (
                     id INT PRIMARY KEY,
@@ -79,10 +110,10 @@ def create_database_and_tables():
                     cvv INT,
                     has_chip VARCHAR(10),
                     num_cards_issued INT,
-                    credit_limit FLOAT,      -- $ 제거 후 저장됨
+                    credit_limit FLOAT,      
                     acct_open_date VARCHAR(20),
                     year_pin_last_changed INT,
-                    card_on_dark_web VARCHAR(10), -- [추가된 컬럼]
+                    card_on_dark_web VARCHAR(10), 
                     FOREIGN KEY (client_id) REFERENCES users_data(id)
                 )
             """)
@@ -97,9 +128,7 @@ def clean_currency(value):
     if value is None:
         return None
     if isinstance(value, str):
-        # $ 기호 제거
         clean_val = value.replace('$', '')
-        # 빈 문자열이면 None 반환 (DB에서 NULL로 처리되도록)
         if clean_val.strip() == '':
             return None
         return clean_val
@@ -113,6 +142,8 @@ def load_csv(table_name, file_name):
         print(f"[WARN] File not found: {file_path}. Skipping {table_name} load.")
         return
     
+    # get_connection 내부에서 에러가 나더라도, 이미 wait_for_db를 통과했으므로
+    # 여기서는 논리적 에러 외에 연결 에러는 거의 발생하지 않음
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
@@ -144,7 +175,6 @@ def load_csv(table_name, file_name):
                 batch_size = 1000
                 data_tuples = []
                 for row in rows:
-                    # [핵심 수정] 모든 값에 대해 $ 기호 제거 등 클리닝 수행
                     cleaned_row = [clean_currency(row[col]) for col in columns]
                     data_tuples.append(tuple(cleaned_row))
                 
@@ -163,6 +193,9 @@ def load_csv(table_name, file_name):
 
 if __name__ == "__main__":
     print("--- DB Initializer Started ---")
+    
+    # [핵심] 여기서 DB가 준비될 때까지 기다립니다.
+    wait_for_db()
     
     # 1. DB/Table 생성
     create_database_and_tables()
