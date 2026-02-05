@@ -2,6 +2,7 @@ import os
 import json
 import time
 import pymysql
+import redis  # 추가
 from confluent_kafka import Consumer, Producer
 from dotenv import load_dotenv
 from pathlib import Path
@@ -9,16 +10,9 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # 0. Load Environment Variables (.env)
 # ---------------------------------------------------------------------------
-# worker.py의 위치: /app/src/worker.py
-# .env의 위치: /app/Docker/.env (Docker 볼륨 마운트 기준)
-
-# 현재 파일(worker.py)의 디렉토리 경로
 BASE_DIR = Path(__file__).resolve().parent
-
-# Docker/.env 경로 계산 (../Docker/.env)
 ENV_PATH = BASE_DIR.parent / 'Docker' / '.env'
 
-# .env 파일 로드
 if ENV_PATH.exists():
     load_dotenv(dotenv_path=ENV_PATH)
     print(f"[INFO] Loaded .env from: {ENV_PATH}")
@@ -28,23 +22,21 @@ else:
 # ---------------------------------------------------------------------------
 # 1. Configuration & Connection Setup
 # ---------------------------------------------------------------------------
-
-# Kafka Configuration
 KAFKA_BROKER = 'kafka:9092'
 SOURCE_TOPIC = 'raw-topic'
 TARGET_TOPIC = '2nd-topic'
 CONSUMER_GROUP = 'fraud-core-group'
 
-# MySQL Configuration (.env에서 로드된 값 사용)
 DB_HOST = 'mysql'
 DB_USER = 'root'
-# .env의 MYSQL_ROOT_PASSWORD 또는 없으면 기본값
 DB_PASSWORD = os.environ.get('MYSQL_ROOT_PASSWORD', 'root') 
-# .env의 MYSQL_DATABASE 또는 없으면 기본값
 DB_NAME = os.environ.get('MYSQL_DATABASE', 'fraud_detection') 
 
+# Redis Configuration
+REDIS_HOST = 'redis'
+REDIS_PORT = 6379
+
 # Initialize Clients
-# 1. Kafka Consumer
 consumer_conf = {
     'bootstrap.servers': KAFKA_BROKER,
     'group.id': CONSUMER_GROUP,
@@ -54,135 +46,166 @@ consumer_conf = {
 consumer = Consumer(consumer_conf)
 consumer.subscribe([SOURCE_TOPIC])
 
-# 2. Kafka Producer
-producer_conf = {
-    'bootstrap.servers': KAFKA_BROKER
-}
+producer_conf = {'bootstrap.servers': KAFKA_BROKER}
 producer = Producer(producer_conf)
+
+# Redis Client 추가 (decode_responses=True로 문자열 처리 편하게)
+r = redis.StrictRedis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
 
 # ---------------------------------------------------------------------------
 # 2. Helper Functions
 # ---------------------------------------------------------------------------
 
 def get_db_connection():
-    """MySQL 커넥션을 생성하여 반환합니다."""
     return pymysql.connect(
-        host=DB_HOST,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        db=DB_NAME,
-        charset='utf8mb4',
-        cursorclass=pymysql.cursors.DictCursor
+        host=DB_HOST, user=DB_USER, password=DB_PASSWORD, db=DB_NAME,
+        charset='utf8mb4', cursorclass=pymysql.cursors.DictCursor
     )
 
-def check_integrity(data):
+def load_data_to_redis():
     """
-    Logic 1: 무결성 검증 (Rule-Check)
-    MySQL을 조회하여 데이터가 유효한지 확인합니다.
+    [Warming] 시스템 시작 시 MySQL 데이터를 레디스로 1회 적재합니다.
+    PM님이 말씀하신 '레디스 캐시화' 단계입니다.
     """
+    print("[INFO] Warming up Redis cache from MySQL...")
+    start_warm = time.time()
     connection = None
     try:
         connection = get_db_connection()
         with connection.cursor() as cursor:
-            # 1. Client ID 검증
-            sql_user = "SELECT 1 FROM users_data WHERE id = %s LIMIT 1"
-            cursor.execute(sql_user, (data['client_id'],))
-            if cursor.fetchone() is None:
-                print(f"[FAIL] Invalid Client ID: {data['client_id']}")
-                return False
+            # 1. Users 데이터 적재 (Set)
+            cursor.execute("SELECT id FROM users_data")
+            users = [str(row['id']) for row in cursor.fetchall()]
+            if users:
+                r.sadd("check:users", *users)
 
-            # 2. Card ID 검증 (Card ID 존재 및 소유주 일치 여부)
-            sql_card = "SELECT 1 FROM cards_data WHERE id = %s AND client_id = %s LIMIT 1"
-            cursor.execute(sql_card, (data['card_id'], data['client_id']))
-            if cursor.fetchone() is None:
-                print(f"[FAIL] Invalid Card ID: {data['card_id']} or Owner Mismatch")
-                return False
+            # 2. Cards 데이터 적재 (Key-Value: card_id -> client_id)
+            cursor.execute("SELECT id, client_id FROM cards_data")
+            cards = cursor.fetchall()
+            for card in cards:
+                r.set(f"check:card:{card['id']}", card['client_id'])
 
-            # 3. Merchant ID 검증
-            sql_merchant = "SELECT 1 FROM merchants_data WHERE id = %s LIMIT 1"
-            cursor.execute(sql_merchant, (data['merchant_id'],))
-            if cursor.fetchone() is None:
-                print(f"[FAIL] Invalid Merchant ID: {data['merchant_id']}")
-                return False
+            # 3. Merchants 데이터 적재 (Set)
+            cursor.execute("SELECT id FROM merchants_data")
+            merchants = [str(row['id']) for row in cursor.fetchall()]
+            if merchants:
+                r.sadd("check:merchants", *merchants)
+                
+        elapsed = time.time() - start_warm
+        print(f"[SUCCESS] Redis Warming Complete! ({elapsed:.2f}s)")
+        print(f" - Users: {len(users)}, Cards: {len(cards)}, Merchants: {len(merchants)}")
+    except Exception as e:
+        print(f"[ERROR] Redis Warming Failed: {e}")
+    finally:
+        if connection: connection.close()
 
-            return True # 모든 검증 통과
+def check_integrity_redis(data):
+    """
+    Logic 1: 무결성 검증 (Redis-based)
+    MySQL을 전혀 호출하지 않고 레디스 메모리에서만 검사합니다.
+    """
+    start_time = time.time()
+    try:
+        # 1. Client ID 검증 (Set 조회)
+        if not r.sismember("check:users", str(data['client_id'])):
+            # print(f"[FAIL] Invalid Client ID: {data['client_id']}")
+            return False
+
+        # 2. Card ID 존재 및 소유주 일치 여부 (String 조회)
+        cached_client_id = r.get(f"check:card:{data['card_id']}")
+        if cached_client_id != str(data['client_id']):
+            # print(f"[FAIL] Invalid Card ID/Owner Mismatch: {data['card_id']}")
+            return False
+
+        # 3. Merchant ID 검증 (Set 조회)
+        if not r.sismember("check:merchants", str(data['merchant_id'])):
+            # print(f"[FAIL] Invalid Merchant ID: {data['merchant_id']}")
+            return False
+
+        return True 
 
     except Exception as e:
-        print(f"[ERROR] DB Check Failed: {e}")
-        # DB 에러 시 보수적으로 False 반환
+        print(f"[ERROR] Redis Check Failed: {e}")
         return False
     finally:
-        if connection:
-            connection.close()
+        # 성능 지표를 위해 실행 시간만 계산해서 반환 (로그 출력은 통계에서 처리)
+        pass
 
 def delivery_report(err, msg):
-    """Kafka Producer 전송 콜백"""
     if err is not None:
         print(f'[ERROR] Message delivery failed: {err}')
-    else:
-        # pass
-        pass
 
 # ---------------------------------------------------------------------------
 # 3. Main Processor Loop
 # ---------------------------------------------------------------------------
 
 def main():
-    print(f"[INFO] Worker started. DB: {DB_NAME}")
+    # 1회성 데이터 적재 실행
+    load_data_to_redis()
+    
+    print(f"[INFO] Worker started. Monitoring Redis-based Integrity Check.")
     print("[INFO] Waiting for messages...")
+    
+    total_checks = 0
+    total_time = 0.0
+    check_times = []
     
     try:
         while True:
-            msg = consumer.poll(1.0) # 1초 대기
+            msg = consumer.poll(1.0)
 
-            if msg is None:
-                continue
+            if msg is None: continue
             if msg.error():
                 print(f"[ERROR] Consumer error: {msg.error()}")
                 continue
 
-            # 1. 데이터 파싱
             try:
                 raw_data = json.loads(msg.value().decode('utf-8'))
-                order_id = raw_data.get('order_id')
+                order_id = raw_data.get('id')
             except Exception as e:
                 print(f"[ERROR] JSON Parsing failed: {e}")
                 continue
 
             # -------------------------------------------------------
-            # Step 1.5: Integrity Check (MySQL)
+            # Step 1.5: Integrity Check (Redis)
             # -------------------------------------------------------
-            is_valid = check_integrity(raw_data)
+            check_start = time.time()
+            is_valid = check_integrity_redis(raw_data) # 레디스 함수로 교체
+            check_time = (time.time() - check_start) * 1000
 
-            # -------------------------------------------------------
+            total_checks += 1
+            total_time += check_time
+            check_times.append(check_time)
+
             # Step 2: ML Fraud Check (Placeholder)
-            # -------------------------------------------------------
-            # 현재는 무조건 False(정상)로 설정 (추후 모델 연동 시 변경)
             is_fraud = False 
             
-            # -------------------------------------------------------
-            # Final Action: 결정 및 전송 (API 응답 없음)
-            # -------------------------------------------------------
-            
-            # 최종 결정 로직 (무결성 통과 AND 사기 아님)
-            # API 응답은 안 하지만, 데이터 파이프라인에는 기록을 남겨야 함
-            
-            # Kafka 전송용 데이터 구성
+            # Kafka 전송 데이터 구성
             output_data = raw_data.copy()
             output_data['is_valid'] = is_valid
             output_data['is_fraud'] = is_fraud
             
-            # TARGET_TOPIC으로 전송 (이후 Spark가 처리)
             producer.produce(
                 TARGET_TOPIC,
                 json.dumps(output_data).encode('utf-8'),
                 callback=delivery_report
             )
-            producer.poll(0) # 비동기 전송 트리거
+            producer.poll(0)
 
-            # 간단한 로그 출력
-            status = "APPROVED" if (is_valid and not is_fraud) else "REJECTED"
-            print(f"[PROCESSED] Order: {order_id} | Valid: {is_valid}, Fraud: {is_fraud} -> {status}")
+            # 100건마다 통계 출력 (레디스 성능 체감을 위해)
+            if total_checks % 100 == 0:
+                avg_time = total_time / total_checks
+                recent_100 = check_times[-100:]
+                recent_avg = sum(recent_100) / len(recent_100)
+                min_time = min(recent_100)
+                max_time = max(recent_100)
+                
+                print("\n" + "⚡" * 30)
+                print(f"📊 [Redis 캐시 검증 통계] {total_checks}건 처리")
+                print(f"   누적 평균 속도: {avg_time:.4f}ms")
+                print(f"   최근 100건 평균: {recent_avg:.4f}ms")
+                print(f"   최소/최대 속도: {min_time:.4f}ms / {max_time:.4f}ms")
+                print("⚡" * 30 + "\n")
 
     except KeyboardInterrupt:
         print("[INFO] Aborted by user")
@@ -192,6 +215,5 @@ def main():
         print("[INFO] Worker shutdown complete")
 
 if __name__ == '__main__':
-    # DB 컨테이너 구동 대기용
-    time.sleep(10) 
+    time.sleep(12) # MySQL 헬스체크 대기 시간을 고려해 조금 넉넉히
     main()
