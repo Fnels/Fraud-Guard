@@ -98,7 +98,7 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE}
 
   # ---------------------------------------------------------------------------
-  # Python Applications: Producer, ML Worker, Dev Env
+  # Python Applications: Producer, redis_warmer, ML Worker, Dev Env
   # ---------------------------------------------------------------------------
   flask-producer:
     build:
@@ -129,10 +129,29 @@ services:
       # CHECKPOINT_PATH: "/app/checkpoint.txt"
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
 
+  redis-warmer:
+    build: 
+      context: ..
+      dockerfile: Docker/Dockerfile.python
+    container_name: redis-warmer
+    command: python /app/src/redis_warmer.py
+    depends_on:
+      mysql:
+        condition: service_healthy
+      db-initializer:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    volumes:
+      - ../:/app
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      
   ml-worker:
     build:
       context: ..
-      dockerfile: Docker/Dockerfile.python
+      dockerfile: Docker/Dockerfile.python  
     command: python /app/src/worker.py
     volumes:
       - ../:/app
