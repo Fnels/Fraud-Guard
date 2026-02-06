@@ -86,7 +86,7 @@ services:
       context: ..
       dockerfile: Docker/Dockerfile.python
     container_name: db-initializer
-    command: bash -lc "python /app/src/init_db.py && python /app/src/init_views.py"
+    command: bash -lc "python /app/src/init_db.py && python /app/src/init_geo.py && python /app/src/init_views.py"
     volumes:
       - ../:/app        # 소스 코드 마운트
       - ../data:/app/data # CSV 파일 마운트 (중요!)
