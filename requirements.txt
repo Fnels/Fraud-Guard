@@ -3,7 +3,6 @@ requests
 pytz
 kafka-python
 redis
-PyMySQL
 SQLAlchemy
 scikit-learn
 pandas
@@ -13,3 +12,4 @@ confluent-kafka
 pymysql
 cryptography
 python-dotenv
+catboost

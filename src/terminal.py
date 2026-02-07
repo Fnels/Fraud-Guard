@@ -6,6 +6,8 @@ import json
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
 from utils.formatter import get_scaled_timestamp
+from datetime import datetime
+import pytz
 
 app = Flask(__name__)
 
@@ -47,14 +49,20 @@ def start_simulation():
     try:
         # 1. 데이터 로드
         df = pd.read_csv('data/origin/transactions_data.csv')
+        df['errors'] = df['errors'].fillna('-')
         
         logger.info("==================================================")
         logger.info(f"🚀 데이터 가공 시뮬레이션 시작 (총 {len(df)}건)")
         logger.info("==================================================")
 
         for i, row in df.iterrows():
-            # (시간 형식: 시:분은 현재, 초.밀리초는 인덱스 기반)
-            data = get_scaled_timestamp(row, i)   
+            
+            data = get_scaled_timestamp(row, i)
+
+            # 현재 시간 계산 (요청 들어온 시간)
+            seoul_tz = pytz.timezone('Asia/Seoul')
+            now_seoul = datetime.now(seoul_tz)
+            order_time = now_seoul.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
             
             # Kafka로 전송 추가
             if producer:
@@ -65,7 +73,7 @@ def start_simulation():
             
             # 3. 도커 로그로 한 줄씩 출력 (줄줄이 찍히는 핵심 부분)
             # JSON 모양을 한 줄로 예쁘게 정렬해서 출력합니다. 고유id 부여, 초 변경,
-            log_msg = f"📤 [IDX:{i:04d}] | {data['id']} | {data['order_time']} | Client:{data['client_id']} | CardId:{data['card_id']}| MerchantId:{data['merchant_id']}｜Amt:{data['amount']}"
+            log_msg = f"📤 [IDX:{i:04d}] | {data['id']} | {order_time} | ClientId:{data['client_id']} | CardId:{data['card_id']}| MerchantId:{data['merchant_id']}｜Amt:{data['amount']}｜Chip:{data['use_chip']}｜ERR:{data['error']}"
             logger.info(log_msg)
             
             # 4. 실시간 느낌을 위한 딜레이 (0.1초)
