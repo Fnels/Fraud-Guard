@@ -1,16 +1,13 @@
-from datetime import datetime
-import pytz
+# from datetime import datetime
+# import pytz
 
 def get_scaled_timestamp(row, index):
-    """
-    요구사항: 시:분까지는 현재 시간, 초와 밀리초는 index 기반으로 생성
-    """
-    seoul_tz = pytz.timezone('Asia/Seoul')
-    # now = datetime.now()
-    now_seoul = datetime.now(seoul_tz)
     
-    # 1. 날짜와 시:분 추출 (예: 2026-02-02 21:40)
-    order_time = now_seoul.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+    # 현재시간 계산
+
+    # seoul_tz = pytz.timezone('Asia/Seoul')
+    # now_seoul = datetime.now(seoul_tz)
+    # order_time = now_seoul.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
     
     # 금액 데이터 정제 ($ 기호 등 제거)
@@ -18,11 +15,12 @@ def get_scaled_timestamp(row, index):
     clean_amount = "".join(c for c in raw_amount if c.isdigit() or c in ['.', '-'])
     
     return {
-        "order_time": order_time,
+        "order_time": row['date'],
         "id":int(row['id']),
         "client_id": int(row['client_id']),
         "card_id": int(row['card_id']),
         "merchant_id": int(row['merchant_id']),
         "amount": float(clean_amount),
+        "use_chip": row['use_chip'],
         "error": row['errors']
     }
