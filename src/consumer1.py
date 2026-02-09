@@ -68,6 +68,7 @@ def main():
                     error VARCHAR(100),
                     is_valid BOOLEAN,
                     is_fraud BOOLEAN,
+                    is_severe_fraud BOOLEAN,
                     processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (client_id) REFERENCES users_data(id),
                     FOREIGN KEY (card_id) REFERENCES cards_data(id),
@@ -85,8 +86,8 @@ def main():
                 
                 # 2. DB Insert 쿼리
                 sql = """
-                    INSERT INTO transactions_data (id, order_id, order_time, client_id, card_id, merchant_id, amount, error, is_valid, is_fraud)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO transactions_data (id, order_id, order_time, client_id, card_id, merchant_id, amount, error, is_valid, is_fraud, is_severe_fraud)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE processed_at = CURRENT_TIMESTAMP
                 """
                 val = (
@@ -99,7 +100,8 @@ def main():
                     data['amount'],
                     error_val,
                     data['is_valid'],
-                    data['is_fraud']
+                    data['is_fraud'],
+                    data['is_severe_fraud']
                 )
 
                 cursor.execute(sql, val)

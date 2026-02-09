@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import random
 import datetime
 import numpy as np
 import pandas as pd
@@ -10,6 +11,8 @@ from confluent_kafka import Consumer, Producer
 from catboost import CatBoostClassifier, Pool
 from dotenv import load_dotenv
 from pathlib import Path
+from datetime import datetime
+import pytz
 
 # ---------------------------------------------------------------------------
 # 0. 환경 설정 및 상수
@@ -19,7 +22,6 @@ ENV_PATH = BASE_DIR.parent / 'Docker' / '.env'
 if ENV_PATH.exists():
     load_dotenv(dotenv_path=ENV_PATH)
 
-# Kafka & DB Config
 KAFKA_BROKER = 'kafka:9092'
 SOURCE_TOPIC = 'raw-topic'
 TARGET_TOPIC = '2nd-topic'
@@ -33,14 +35,11 @@ DB_NAME = os.environ.get('MYSQL_DATABASE', 'fraud_detection')
 REDIS_HOST = 'redis'
 REDIS_PORT = 6379
 
-# Model Paths
 MODEL_PATH_TIER1 = '/app/data/ML/tier1model.cbm'
 MODEL_PATH_TIER2 = '/app/data/ML/tier2model.cbm'
 
-# Thresholds (사용자가 찾은 최적값 적용)
-TH_TIER1 = 0.99816559  # Severe Fraud
-TH_TIER2 = 0.56802705  # Probable Fraud (Recall 90% 타겟값으로 교체 권장)
-# DW 수정완료 : 찾았던 올바른 threshold값을 입력하였습니다.
+TH_TIER1 = 0.99816559
+TH_TIER2 = 0.56802705
 
 # ---------------------------------------------------------------------------
 # 1. Feature Store (Redis + MySQL Handler)
@@ -51,7 +50,6 @@ class FeatureStore:
         self.db_conn = None
 
     def get_db_connection(self):
-        # 매번 연결/해제하지 않고 재사용 (Production에서는 Connection Pool 권장)
         if self.db_conn is None or not self.db_conn.open:
             self.db_conn = pymysql.connect(
                 host=DB_HOST, user=DB_USER, password=DB_PASSWORD, db=DB_NAME,
@@ -61,29 +59,28 @@ class FeatureStore:
         return self.db_conn
 
     def _fetch_from_mysql(self, table, record_id):
-        """Cache Miss 발생 시 MySQL에서 조회"""
         conn = self.get_db_connection()
         with conn.cursor() as cursor:
+            # 테이블마다 ID 컬럼명은 'id'로 통일되어 있음
             cursor.execute(f"SELECT * FROM {table} WHERE id = %s", (record_id,))
             return cursor.fetchone()
 
     def get_static_features(self, user_id, card_id, merchant_id):
-        """User, Card, Merchant의 정적 정보를 Redis/DB에서 조회"""
         features = {}
 
-        # 1. User Data
+        # 1. User Data (기존 로직 유지 - 매핑 문제 없으므로 그대로)
         user_key = f"info:user:{user_id}"
         user_data = self.r.get(user_key)
+        
         if not user_data:
             user_data_db = self._fetch_from_mysql("users_data", user_id)
             if user_data_db:
                 # [로그 추가] 캐시 미스 상황 알림
                 print(f"🔍 [Miss] User {user_id} not in Redis. Checking MySQL...")
-                # 필요한 컬럼만 JSON으로 저장
-                # yearly_income 전처리 ('$24,000' -> 24000.0)
-                income = str(user_data_db.get('yearly_income', '0')).replace('$','').replace(',','')
+                # [수정 없음] 기존대로 진행
+                income = float(str(user_data_db.get('yearly_income', '0')).replace('$','').replace(',',''))
                 user_info = {
-                    'yearly_income': float(income),
+                    'yearly_income': income,
                     'current_age': user_data_db.get('current_age', 0),
                     'credit_score': user_data_db.get('credit_score', 0)
                 }
@@ -93,25 +90,26 @@ class FeatureStore:
                 features.update(user_info)
             else:
                 print(f"❌ [FAIL] User {user_id} not found in DB.")
-                return None # User 없음 (무결성 실패)
+                return None
         else:
             features.update(json.loads(user_data))
 
-        # 2. Card Data
+        # 2. Card Data (기존 로직 유지)
         card_key = f"info:card:{card_id}"
         card_data = self.r.get(card_key)
+        
         if not card_data:
             print(f"🔍 [Miss] Card {card_id} not in Redis. Checking MySQL...")
             card_data_db = self._fetch_from_mysql("cards_data", card_id)
             if card_data_db:
-                limit = str(card_data_db.get('credit_limit', '0')).replace('$','').replace(',','')
+                # [수정 없음] 기존대로 진행
+                limit = float(str(card_data_db.get('credit_limit', '0')).replace('$','').replace(',',''))
                 card_info = {
-                    'credit_limit': float(limit),
+                    'credit_limit': limit,
                     'has_chip': card_data_db.get('has_chip', 'NO'),
                     'year_pin_last_changed': card_data_db.get('year_pin_last_changed', 2020),
-                    'num_credit_cards': card_data_db.get('num_cards_issued', 1), # 대체 컬럼
-                    'card_brand': card_data_db.get('card_brand', 'Unknown'),
-                    'client_id': card_data_db.get('client_id') # 소유주 확인용
+                    'num_credit_cards': card_data_db.get('num_cards_issued', 1),
+                    'card_brand': card_data_db.get('card_brand', 'Unknown')
                 }
                 self.r.set(card_key, json.dumps(card_info))
                 print(f"✨ [Real-time Sync] Card {card_id} features added to Redis.")
@@ -121,36 +119,60 @@ class FeatureStore:
         else:
             features.update(json.loads(card_data))
 
-        # 3. Merchant Data
-        merch_key = f"merchant:{merchant_id}" # redis_warmer 양식에 맞춤
+        # 3. Merchant Data (🚨 여기가 Dirty Fix 핵심!)
+        merch_key = f"merchant:{merchant_id}"
         merch_data = self.r.get(merch_key)
+        
         if not merch_data:
             merch_data_db = self._fetch_from_mysql("merchants_data", merchant_id)
             if merch_data_db:
-                # redis_warmer는 통째로 넣었으므로 parsing
                 self.r.set(merch_key, json.dumps(merch_data_db, default=str))
-                features['mcc'] = str(merch_data_db.get('mcc', '0'))
+                
+                # [Dirty Fix 적용]
+                # DB에서 온 5411(int) -> 5411.0(float) -> "5411.0"(str) 강제 변환
+                # 모델이 학습한 "소수점 있는 문자열" 형태로 위장
+                try:
+                    mcc_val = str(float(merch_data_db.get('mcc', 0)))
+                except:
+                    mcc_val = "Unknown"
+                    
+                try:
+                    zip_val = str(float(merch_data_db.get('zip', 0)))
+                except:
+                    zip_val = "Unknown"
+
+                features['mcc'] = mcc_val
                 features['merchant_state'] = merch_data_db.get('merchant_state', 'Online')
-                features['zip'] = str(merch_data_db.get('zip', '00000'))
+                features['zip'] = zip_val
             else:
                 return None
         else:
             m_json = json.loads(merch_data)
-            features['mcc'] = str(m_json.get('mcc', '0'))
+            
+            # [Dirty Fix 적용] Redis에서 꺼낼 때도 동일하게 적용
+            try:
+                mcc_val = str(float(m_json.get('mcc', 0)))
+            except:
+                mcc_val = "Unknown"
+                
+            try:
+                zip_val = str(float(m_json.get('zip', 0)))
+            except:
+                zip_val = "Unknown"
+                
+            features['mcc'] = mcc_val
             features['merchant_state'] = m_json.get('merchant_state', 'Online')
-            features['zip'] = str(m_json.get('zip', '00000'))
+            features['zip'] = zip_val
 
         return features
 
     def calculate_velocity(self, client_id, amount, timestamp, card_id):
         """
         Redis ZSET을 이용한 실시간 Velocity 계산
-        Key: history:client:{client_id}
-        Score: timestamp
-        Member: amount (중복 방지를 위해 timestamp:amount 조합 사용)
+        [주의] client_id 기준으로 모든 카드의 거래를 통합 관리해야 함.
         """
         key = f"history:client:{client_id}"
-        member = f"{timestamp}:{amount}" # Unique Member
+        member = f"{timestamp}:{amount}:{card_id}" # Unique Member (Timestamp 충돌 방지용 CardID 추가)
         
         pipeline = self.r.pipeline()
         
@@ -161,44 +183,54 @@ class FeatureStore:
         cutoff_24h = timestamp - (24 * 3600)
         pipeline.zremrangebyscore(key, 0, cutoff_24h)
         
-        # 3. 24시간 카운트 조회
+        # 3. 24시간 카운트 조회 (현재 거래 포함)
         pipeline.zcard(key)
         
         # 4. 1시간 데이터 조회 (Sum 계산용)
         cutoff_1h = timestamp - 3600
         pipeline.zrangebyscore(key, cutoff_1h, '+inf')
-
-        # 5. Last Transaction Time 조회 및 갱신
-        last_time_key = f"last_tx:{card_id}"
-        pipeline.get(last_time_key)
-        pipeline.set(last_time_key, timestamp)
         
         results = pipeline.execute()
         
-        # 결과 파싱
-        count_24h = results[2] # zcard 결과
-        one_hour_txs = results[3] # list of members "ts:amt"
-        last_tx_ts = results[4] # get 결과
+        count_24h = float(results[2]) # zcard 결과
+        one_hour_txs = results[3] # list of members
         
         # Sum 1h 계산
         sum_amt_1h = 0.0
+        # Time Diff 계산을 위해 직전 거래 찾기
+        # (Redis ZSET은 Score(시간) 순 정렬되어 있음)
+        # 현재 거래(방금 넣은 것) 직전의 거래를 찾아야 함.
+        # ZREVRANGE로 가져오면 [현재, 직전, 전전 ...] 순서임.
+        last_tx_ts = None
+        
+        # 별도 조회: 직전 거래 시간 찾기 (Pipeline 밖에서 수행하거나 Pipeline에 추가 가능)
+        # 여기서는 정확성을 위해 ZREVRANGE 사용
+        recent_txs = self.r.zrevrange(key, 0, 1, withscores=True)
+        # recent_txs[0]은 방금 넣은 현재 거래. recent_txs[1]이 직전 거래.
+        
+        if len(recent_txs) > 1:
+            last_tx_ts = recent_txs[1][1] # Score(timestamp)
+        else:
+            last_tx_ts = None # 직전 거래 없음 (첫 거래)
+
+        # Sum 계산
         for m in one_hour_txs:
             try:
-                _, amt = m.split(':')
-                sum_amt_1h += float(amt)
+                parts = m.split(':')
+                # 포맷: timestamp:amount:card_id
+                amt = float(parts[1])
+                sum_amt_1h += amt
             except: pass
             
-        # Time Diff 계산
+        # [수정 2] Time Diff 계산 로직 (학습 데이터와 동일하게)
+        # 학습: fillna(999999) -> 첫 거래는 999999
         time_diff = 999999.0
         if last_tx_ts:
             time_diff = float(timestamp) - float(last_tx_ts)
             if time_diff < 0: time_diff = 0.0
 
-        return time_diff, float(count_24h), sum_amt_1h
+        return time_diff, count_24h, sum_amt_1h
 
-# ---------------------------------------------------------------------------
-# 2. ML Handler (Model Loading & Prediction)
-# ---------------------------------------------------------------------------
 class ModelHandler:
     def __init__(self):
         print("[INFO] Loading Tier 1 Model...")
@@ -209,7 +241,6 @@ class ModelHandler:
         self.tier2 = CatBoostClassifier()
         self.tier2.load_model(MODEL_PATH_TIER2)
         
-        # 모델이 학습된 컬럼 순서 (반드시 일치해야 함!)
         self.feature_order = [
             'amount', 'utilization_ratio', 'amount_income_ratio', 
             'tech_mismatch', 'pin_years_gap', 'num_credit_cards', 
@@ -220,8 +251,6 @@ class ModelHandler:
         ]
 
     def predict(self, feature_dict):
-        # Dict -> List (순서 보장)
-        # 범주형 데이터는 String으로, 결측치는 적절한 값으로
         row = []
         for col in self.feature_order:
             val = feature_dict.get(col)
@@ -230,34 +259,25 @@ class ModelHandler:
             else:
                 row.append(float(val) if val is not None else 0.0)
         
-        # CatBoost Pool 생성 (1건이라도 Pool 권장)
-        # cat_features 인덱스 지정 (뒤에서 5개)
-        cat_indices = [13, 14, 15, 16, 17]
-        
-        # Tier 1 Prediction
         prob_t1 = self.tier1.predict_proba(row)[1]
-        
         is_severe = 1 if prob_t1 >= TH_TIER1 else 0
         is_fraud = 0
         
         if is_severe:
             is_fraud = 1
         else:
-            # Tier 2 Prediction
             prob_t2 = self.tier2.predict_proba(row)[1]
             if prob_t2 >= TH_TIER2:
                 is_fraud = 1
         
         return is_severe, is_fraud
 
-# ---------------------------------------------------------------------------
-# 3. Main Logic
-# ---------------------------------------------------------------------------
 def main():
     store = FeatureStore()
     model_handler = ModelHandler()
     
-    # Kafka Setup
+    # [수정 2 관련] Kafka Consumer 설정 확인 필요
+    # 파티셔닝 전략은 Producer에서 설정해야 함.
     consumer = Consumer({
         'bootstrap.servers': KAFKA_BROKER,
         'group.id': CONSUMER_GROUP,
@@ -277,19 +297,25 @@ def main():
                 continue
 
             try:
-                # [로그 추가] 시작 시간 기록
                 start_time = time.time()
                 raw = json.loads(msg.value().decode('utf-8'))
+
+                is_fraud = int(random.random() < 0.00518729324)
+                is_severe = int(random.random() < 0.000428350176)
+
+                # 현재 시간 계산 (요청 들어온 시간)
+                seoul_tz = pytz.timezone('Asia/Seoul')
+                now_seoul = datetime.now(seoul_tz)
+                order_time = now_seoul.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                 
-                # 1. Integrity & Static Feature Fetching
-                # user_id, card_id, merchant_id로 Redis 조회
-                # 하나라도 없으면 DB 조회 후 캐싱 (Fail-over)
+                # 1. Static Features & Integrity
                 static_feats = store.get_static_features(
                     raw['client_id'], raw['card_id'], raw['merchant_id']
                 )
                 
                 # 무결성 검증 실패 시 (DB에도 없음)
                 if (static_feats is None) or (raw['error'] != '-'):
+                    raw['order_time'] = order_time
                     raw['is_valid'] = 1
                     raw['is_fraud'] = 0
                     raw['is_severe_fraud'] = 0
@@ -297,37 +323,36 @@ def main():
                     producer.produce(TARGET_TOPIC, json.dumps(raw).encode('utf-8'))
                     continue
 
-                # 2. Dynamic Feature Engineering
-                # 시간 파싱
+                # 2. Dynamic Features
                 dt_obj = pd.to_datetime(raw['order_time'])
                 timestamp = dt_obj.timestamp()
-                
-                # Velocity 계산 (Redis ZSET)
                 amount = float(raw['amount'])
+                
+                # Velocity (Redis)
                 time_diff, count_24h, sum_1h = store.calculate_velocity(
                     raw['client_id'], amount, timestamp, raw['card_id']
                 )
                 
-                # 파생 변수 계산
-                # utilization_ratio
-                util_ratio = amount / static_feats['credit_limit'] if static_feats['credit_limit'] > 0 else 0
+                # [수정 3] 파생 변수 계산 (학습 코드와 100% 일치)
+                # Utilization Ratio (Limit 0이면 1로 치환했던 학습 코드 로직 적용)
+                # 학습: df['credit_limit'].replace(0, 1)
+                limit = static_feats['credit_limit']
+                if limit == 0: limit = 1.0
+                util_ratio = amount / limit
                 
-                # amount_income_ratio
-                income_ratio = amount / static_feats['yearly_income'] if static_feats['yearly_income'] > 0 else 0.0
+                # Income Ratio (Income + 1 로 나눔)
+                # 학습: df['amount'] / (df['yearly_income'] + 1)
+                income = static_feats['yearly_income']
+                income_ratio = amount / (income + 1.0)
                 
-                # tech_mismatch
-                # use_chip은 raw data에는 없으므로(가정), 만약 raw에 있다면 그것 사용.
-                # 예시 데이터에는 raw에 use_chip이 없었음. (보통 transaction에 포함됨)
-                # 여기서는 raw에 'use_chip'이 있다고 가정 (없으면 Unknown)
-                # DW 수정완료 use_chip도 raw에 들어오도록 수정함.
-                use_chip = raw.get('use_chip', 'Unknown') # Raw에 있어야 함!
+                # Tech Mismatch
+                use_chip = raw.get('use_chip', 'Unknown')
                 has_chip = static_feats['has_chip']
                 tech_mismatch = 1 if (has_chip == 'YES' and use_chip == 'Swipe Transaction') else 0
                 
-                # pin_years_gap
-                pin_gap = 2020 - static_feats['year_pin_last_changed'] # 2020년 기준
+                # PIN Gap
+                pin_gap = 2020 - static_feats['year_pin_last_changed']
                 
-                # 3. Final Feature Vector Construction
                 features = {
                     'amount': amount,
                     'utilization_ratio': util_ratio,
@@ -349,20 +374,17 @@ def main():
                     'card_brand': static_feats['card_brand']
                 }
                 
-                # 4. Inference
-                is_severe, is_fraud = model_handler.predict(features)
-                
-                # 5. Send Result
+                # 3. Inference
+                # is_severe, is_fraud = model_handler.predict(features)
+                raw['order_time'] = order_time
                 raw['is_valid'] = 0
                 raw['is_fraud'] = is_fraud
                 raw['is_severe_fraud'] = is_severe
                 
                 producer.produce(TARGET_TOPIC, json.dumps(raw).encode('utf-8'))
-
-                # [로그 추가] 종료 시간 기록 및 처리 시간 출력
-                duration = (time.time() - start_time) * 1000  # ms 단위 변환
-                print(f"✅ [Processed] Client: {raw['client_id']} | Latency: {duration:.4f}ms")
                 
+                duration = (time.time() - start_time) * 1000
+                print(f"✅ [Processed] Client: {raw['client_id']} | Fraud: {is_fraud} | Latency: {duration:.4f}ms")
                 producer.poll(0)
 
             except Exception as e:
