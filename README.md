@@ -120,7 +120,7 @@ docker compose logs -f flask-producer
 docker-compose logs -f consumer-group-1
 
 # 6. worker.py 로그 확인
-docker compose logs -f consumer-group-1
+docker-compose logs -f ml-worker
 
 # 7. consumer2.py 로그 확인
 docker compose logs -f consumer-group-2
