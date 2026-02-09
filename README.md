@@ -144,8 +144,8 @@ docker exec -it redis redis-cli
 # 1번 유저데이터 삭제
 SREM check:users "1"
 
-# ID가 1인 유저가 있는지 확인(있으면 1, 없으면 0 반환 )
-SISMEMBER check:users "1"
+# ID가 1인 유저가 있는지 확인
+GET info:user:1
 
 # 접속 후 소스 코드 확인
 ls -l /app/src/
