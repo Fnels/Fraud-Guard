@@ -20,19 +20,48 @@ MYSQL_DATABASE=fraud_detection
 
 ```bash
 2nd_project/
-├── requirements.txt      <-- Python 의존성 목록 (모든 컨테이너 공통)
-├── .gitignore
-├── README.md
+├── data/
+│   ├── geo/
+│   │   ├── cb_2023_us_state_20m.shx
+│   │   ├── cb_2023_us_state_20m.zip
+│   │   └── us_states.geojson
+│   └── origin/
+│       ├── cards_data.csv
+│       ├── merchants_data.csv
+│       ├── train_fraud_labels.json
+│       ├── transactions_data.csv
+│       └── users_data.csv
 ├── Docker/
 │   ├── .env              <-- 환경 변수 설정
 │   ├── compose.yml
 │   ├── Dockerfile.python
 │   └── Dockerfile.spark
-└── src/                  <-- 개발한 Python 소스 코드를 이곳에 위치
-    ├── Producer_raw.py
-    ├── Worker.py
-    ├── Consumer1.py
-    └── ...
+│
+├── src/                  <-- 개발한 Python 소스 코드를 이곳에 위치
+│   ├── ML/
+│   │   ├── ML.ipynb
+│   │   └── ML.py
+│   └── utils/
+│       ├── __pycache__/
+│       │   └── formatter.cpython-312.pyc
+│       ├── formatter.py
+│       ├── __init__.py
+│       ├── consumer1.py
+│       ├── consumer2.py
+│       ├── init_db.py
+│       ├── init_geo.py
+│       ├── init_views.py
+│       ├── redis_warmer.py
+│       ├── terminal.py
+│       ├── test_flow.py
+│       └── worker.py
+│
+├── venv/
+├── .gitignore
+├── checkpoint.txt
+├── README.md
+└── requirements.txt   <-- Python 의존성 목록 (모든 컨테이너 공통)
+    
 ```
 
 ## 3. 실행 방법 (Usage)
@@ -49,6 +78,22 @@ docker compose up -d --build
 
 # 3. 실행 상태 확인
 docker compose ps
+
+# 4. 프로듀서(terminal.py) 플라스크 서버 실행및 로그 확인
+docker compose logs -f flask-producer
+
+# 5. consumer1.py 로그 확인
+docker-compose logs -f consumer-group-1
+
+# 6. worker.py 로그 확인
+docker compose logs -f consumer-group-1
+
+# 7. consumer2.py 로그 확인
+docker compose logs -f consumer-group-2
+
+# 8. 터미널에서 MySQL 강제종료및 수동 실행
+docker stop mysql
+docker start mysql
 ```
 
 ## 4. 개발 환경 접속 (Python Dev)
@@ -58,6 +103,15 @@ Python 파일 실행, 테스트, 디버깅을 위해 `python-dev` 컨테이너�
 ```bash
 # python-dev 컨테이너 내부 쉘 접속
 docker exec -it python-dev bash
+
+# 레데스 컨테이너 접속
+docker exec -it redis redis-cli
+
+# 1번 유저데이터 삭제
+SREM check:users "1"
+
+# ID가 1인 유저가 있는지 확인(있으면 1, 없으면 0 반환 )
+SISMEMBER check:users "1"
 
 # 접속 후 소스 코드 확인
 ls -l /app/src/
