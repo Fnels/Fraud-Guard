@@ -6,6 +6,8 @@ import json
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
 from utils.formatter import get_scaled_timestamp
+from datetime import datetime
+import pytz
 
 app = Flask(__name__)
 
@@ -56,6 +58,11 @@ def start_simulation():
         for i, row in df.iterrows():
             
             data = get_scaled_timestamp(row, i)
+
+            # 현재 시간 계산 (요청 들어온 시간)
+            seoul_tz = pytz.timezone('Asia/Seoul')
+            now_seoul = datetime.now(seoul_tz)
+            order_time = now_seoul.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
             
             # Kafka로 전송 추가
             if producer:
