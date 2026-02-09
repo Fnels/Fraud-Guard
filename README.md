@@ -142,7 +142,7 @@ docker exec -it python-dev bash
 docker exec -it redis redis-cli
 
 # 1번 유저데이터 삭제
-SREM check:users "1"
+DEL info:user:1
 
 # ID가 1인 유저가 있는지 확인
 GET info:user:1
