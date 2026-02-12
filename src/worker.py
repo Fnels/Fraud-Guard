@@ -163,12 +163,12 @@ class FeatureStore:
         raw_zip = m_data.get('zip')
         try:
             if raw_zip is None or str(raw_zip).lower() == 'nan':
-                zip_val = "Unknown"
+                # [수정 3] "Unknown" -> "nan" (학습 데이터 일치화)
+                zip_val = "nan"
             else:
-                # float -> str (소수점 유지)
                 zip_val = str(float(str(raw_zip)))
         except:
-            zip_val = "Unknown"
+            zip_val = "nan" # 예외 발생 시에도 nan으로 처리
             
         # Merchant State
         raw_state = m_data.get('merchant_state')
@@ -358,8 +358,10 @@ def main():
                 # [수정 2] 파생 변수 계산 & Type Casting
                 # Utilization Ratio
                 limit = static_feats['credit_limit']
-                if limit == 0: limit = 1.0
-                util_ratio = amount / limit
+                if limit == 0:
+                    util_ratio = float('inf') # 파이썬 infinity
+                else:
+                    util_ratio = amount / limit
                 
                 # Income Ratio
                 income = static_feats['yearly_income']
@@ -371,7 +373,7 @@ def main():
                 tech_mismatch = 1 if (has_chip == 'YES' and use_chip == 'Swipe Transaction') else 0
                 
                 # PIN Gap
-                pin_gap = 2020 - static_feats['year_pin_last_changed']
+                pin_gap = 2019 - static_feats['year_pin_last_changed']
                 
                 # Feature Vector Construction (Type 명시 적용)
                 features = {
