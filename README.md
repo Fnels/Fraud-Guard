@@ -5,7 +5,6 @@
 이 가이드는 Linux 환경에서 프로젝트 Docker 인프라를 배포하고 사용하는 방법을 설명합니다.
 
 ## !!사전설정 : Docker/.env 파일 생성 후 아래의 내용을 붙여넣어주세요.
-# Database
 MYSQL_ROOT_PASSWORD=root
 MYSQL_DATABASE=fraud_detection
 
